@@ -2,6 +2,13 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:todo_front/auth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:todo_front/login.dart';
+import 'package:todo_front/splash.dart';
+import 'package:todo_front/login.dart';
+import 'dart:math' as math;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 void main() {
   runApp(const MyApp());
@@ -50,26 +57,12 @@ class MyApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MainPage(),
+      routes: {
+        '/': (_) => LoginScreen(),
+        '/main': (_) => MainPage(),
+        '/login': (_) => LoginScreen(),
+      },
     );
-  }
-}
-
-Future<List<Map<String, dynamic>>> fetchData() async {
-  final response = await http.get(Uri.parse('http://192.168.0.102:8000/api/'));
-  print('response');
-  print(response.headers);
-  print('response $response.body');
-  if (response.statusCode == 200) {
-    var decodedBody = utf8.decode(response.bodyBytes);
-  print(decodedBody);
-    List<dynamic> data = json.decode(decodedBody);
-    print('data');
-    print('data $data');
-
-    return data.map((item) => item as Map<String, dynamic>).toList();
-  } else {
-    throw Exception('Failed to load data');
   }
 }
 
@@ -82,15 +75,94 @@ class MainPage extends StatefulWidget {
 
 class _MainPageState extends State<MainPage> {
   List<bool> checkboxes = [];
+  final storage = new FlutterSecureStorage();
   late Future<List<Map<String, dynamic>>> futureData;
+  final GoogleSignIn googleSignIn = GoogleSignIn(
+      scopes: <String>[
+        'email',
+      ],
+      clientId:
+          "48608572513-19oeb7v99nj1sjbksiqq41npdh4sv768.apps.googleusercontent.com");
 
   @override
   void initState() {
+    checkSignIn();
+
     super.initState();
     futureData = fetchData();
     futureData.then((data) {
       checkboxes = data.map((item) => item['completed'] as bool).toList();
     });
+  }
+
+  Future<List<Map<String, dynamic>>> fetchData() async {
+    final String? userEmail = await getEmailFromStorage();
+    final response = await http.get(Uri.parse('http://127.0.0.1:8000/api/')
+        .replace(queryParameters: {'email': userEmail}));
+    print('response');
+    print(response.headers);
+    print('response $response.body');
+    if (response.statusCode == 200) {
+      var decodedBody = utf8.decode(response.bodyBytes);
+      print(decodedBody);
+      List<dynamic> data = json.decode(decodedBody);
+      print('data');
+      print('data $data');
+
+      return data.map((item) => item as Map<String, dynamic>).toList();
+    } else {
+      throw Exception('Failed to load data');
+    }
+  }
+
+  void sendTokenToBackend(String accessToken) async {
+    // Your Django REST API endpoint
+    final String backendUrl = 'http://localhost:8000/google-login/';
+
+    // Send a POST request with the token
+    final response = await http.post(
+      Uri.parse(backendUrl),
+      headers: <String, String>{
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: json.encode({'access_token': accessToken}),
+    );
+    print('info sent');
+    if (response.statusCode == 200) {
+      // Handle the response from the server
+      final responseData = json.decode(response.body);
+      print(responseData);
+      // Use the response data as needed
+    } else {
+      // Handle errors
+      print('Failed to send token: ${response.body}');
+    }
+  }
+
+  Future<String?> getTokenFromStorage() async {
+    final storage = FlutterSecureStorage();
+    String? accessToken = await storage.read(key: 'google_access_token');
+    print(accessToken);
+    return accessToken;
+  }
+
+  Future<String?> getEmailFromStorage() async {
+    final storage = FlutterSecureStorage();
+    String? email = await storage.read(key: 'email');
+    print(email);
+    return email;
+  }
+
+  void checkSignIn() async {
+    bool isSignedIn = await googleSignIn.isSignedIn();
+    if (isSignedIn) {
+      String? accessToken = await getTokenFromStorage();
+      print('Signed in successful');
+      sendTokenToBackend(accessToken!);
+    } else {
+      print('Signed in not successful');
+      Navigator.pushReplacementNamed(context, '/login');
+    }
   }
 
   Future<void> _refreshData() async {
@@ -105,18 +177,22 @@ class _MainPageState extends State<MainPage> {
     setState(() {
       checkboxes[index] = newValue!;
     });
-    var url = Uri.parse('http://192.168.0.102:8000/api/$ItemIndex/');
 
+    var url = Uri.parse('http://127.0.0.1:8000/api/$ItemIndex/');
+    final String? userEmail = await getEmailFromStorage();
+    print('${userEmail}');
     // Data to be sent
     var data = {
       "id": ItemIndex, // Assuming the itemIndex is the ID you want to send
       "completed": newValue!,
+      "email": userEmail,
     };
 
     try {
       // Send the PUT request
       var response = await http.patch(
-        url,
+        Uri.parse('http://127.0.0.1:8000/api/$ItemIndex/')
+            .replace(queryParameters: {'email': userEmail}),
         headers: {
           'Content-Type': 'application/json; charset=UTF-8',
         },
@@ -136,10 +212,34 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
+  void clearElementFromStorage(String key) async {
+    try {
+      await storage.delete(key: key);
+      print('Element with key $key cleared from storage.');
+    } catch (e) {
+      print('Error clearing element from storage: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+            icon: Transform(
+              alignment: Alignment.center,
+              transform: Matrix4.rotationY(
+                  math.pi), // This flips the icon horizontally
+              child: Icon(Icons.exit_to_app_sharp),
+            ),
+            onPressed: () {
+              setState(() {
+                clearElementFromStorage('google_access_token');
+                clearElementFromStorage('email');
+                googleSignIn.signOut();
+              });
+              Navigator.pushReplacementNamed(context, '/login');
+            }),
         scrolledUnderElevation: 0,
         title: const Text(
           'Simple To-Do',
@@ -205,11 +305,12 @@ class _MainPageState extends State<MainPage> {
                               "completed": false,
                             };
                             if (_textFieldController.text.isNotEmpty) {
-                              var url = Uri.parse(
-                                  'http://192.168.0.102:8000/api/'); // URL to your API endpoint
+                              var userEmail = await getEmailFromStorage();
+                              var url = Uri.parse('http://127.0.0.1:8000/api/');
+                              print(userEmail); // URL to your API endpoint
                               var data = {
                                 "title": _textFieldController.text,
-                                // Add other task properties if necessary
+                                "user_email": userEmail,
                               };
 
                               try {
@@ -311,11 +412,12 @@ class _MainPageState extends State<MainPage> {
                         trailing: IconButton(
                           icon: Icon(Icons.close),
                           onPressed: () async {
-                            var url = Uri.parse(
-                                'http://192.168.0.102:8000/api/${itemIndex}/');
-
+                            final String? userEmail = await getEmailFromStorage();
                             try {
-                              var response = await http.delete(url);
+                              var response = await http.delete(Uri.parse(
+                                      'http://127.0.0.1:8000/api/${itemIndex}/')
+                                  .replace(
+                                      queryParameters: {'email': userEmail}));
 
                               if (response.statusCode == 200 ||
                                   response.statusCode == 204) {
